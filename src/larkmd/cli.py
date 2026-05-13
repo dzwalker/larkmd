@@ -94,6 +94,52 @@ def apply(ctx: click.Context, only: tuple[str, ...], force: bool, skip_link_pass
         syncer.link_pass()
 
 
+@main.command("pull-plan")
+@click.option("--only", multiple=True, help="Limit to these md paths (repo-relative)")
+@click.pass_context
+def pull_plan(ctx: click.Context, only: tuple[str, ...]) -> None:
+    """Dry-run reverse sync: list clean / remote-only / local-only / conflict per file."""
+    from larkmd.puller import Puller
+    cfg = _load_cfg(ctx.obj["config_path"])
+    puller = Puller(cfg)
+    actions = puller.plan(only=list(only) or None)
+    counts: dict[str, int] = {}
+    for a in actions:
+        counts[a.kind] = counts.get(a.kind, 0) + 1
+    summary = " / ".join(f"{n} {k}" for k, n in sorted(counts.items()))
+    print(f"=== pull-plan: {summary or '0 actions'} ===")
+    marker = {"clean": ".", "remote-only": "R", "local-only": "L", "conflict": "!", "missing": "?"}
+    for a in actions:
+        m = marker.get(a.kind, "?")
+        print(f"  {m} {a.rel}  ({a.reason})")
+
+
+@main.command()
+@click.option("--only", multiple=True, help="Limit to these md paths (repo-relative)")
+@click.option("--force-remote", is_flag=True,
+              help="On conflict, overwrite local with remote.")
+@click.option("--force-local", is_flag=True,
+              help="On conflict or local-only, keep local and refresh baseline revision.")
+@click.pass_context
+def pull(ctx: click.Context, only: tuple[str, ...], force_remote: bool, force_local: bool) -> None:
+    """Reverse sync: pull Feishu docs back to local md."""
+    from larkmd.puller import Puller
+    if force_remote and force_local:
+        click.echo("--force-remote and --force-local are mutually exclusive", err=True)
+        sys.exit(2)
+    cfg = _load_cfg(ctx.obj["config_path"])
+    puller = Puller(cfg)
+    actions = puller.plan(only=list(only) or None)
+    print(f"=== pull: processing {len(actions)} files ===")
+    results = puller.apply(actions, force_remote=force_remote, force_local=force_local)
+    n_pulled = sum(1 for r in results.values() if r is not None)
+    n_conflict = sum(1 for a in actions
+                     if a.kind == "conflict" and not (force_remote or force_local))
+    print(f"=== done: {n_pulled} pulled, {n_conflict} aborted by conflict ===")
+    if n_conflict:
+        sys.exit(3)
+
+
 @main.command()
 @click.option("--only", multiple=True, help="Limit to these md paths")
 @click.pass_context

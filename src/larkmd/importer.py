@@ -19,15 +19,21 @@ from larkmd.config import ImporterConfig
 from larkmd.errors import ImporterStuckError, LarkCliError
 
 
-def import_md(md_path: Path, folder_token: str, name: str, *, cli_path: str = "lark-cli") -> dict:
+def import_md(
+    md_path: Path, folder_token: str, name: str,
+    *, cli_path: str = "lark-cli", profile: str | None = None,
+) -> dict:
     """drive +import 会先打几行进度日志，再吐 JSON。
     lark-cli 要求 --file 是 cwd 下的相对路径，因此 cd 到 md 的目录。
     返回 {"token": ..., "url": ..., "type": ...}.
 
     Note: 这里不走 Client.call，因为 +import 是子命令而非 raw API；
     输出格式也不是纯 JSON（前面有进度日志），需要单独 parse。"""
-    cmd = [
-        cli_path, "drive", "+import",
+    cmd = [cli_path]
+    if profile:
+        cmd += ["--profile", profile]
+    cmd += [
+        "drive", "+import",
         "--file", md_path.name,
         "--folder-token", folder_token,
         "--type", "docx",

@@ -36,7 +36,10 @@ class Client:
         cwd: Path | None = None,
         identity: str = "user",
     ) -> dict[str, Any]:
-        cmd = [self.cfg.cli_path] + args + ["--as", identity]
+        cmd = [self.cfg.cli_path]
+        if self.cfg.profile:
+            cmd += ["--profile", self.cfg.profile]
+        cmd += args + ["--as", identity]
         if params is not None:
             cmd += ["--params", json.dumps(params)]
 

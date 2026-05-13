@@ -17,6 +17,21 @@ _DESCENDANT_BLACKLIST = {
 }
 
 
+def get_document_revision(client: Client, docx_token: str) -> int | None:
+    """Fetch the document's current revision_id (used for remote-change detection
+    in reverse sync). Returns None if the field isn't present (older API versions).
+
+    Endpoint: GET /open-apis/docx/v1/documents/{docx_token}
+    Response: {"data": {"document": {"document_id": "...", "revision_id": N, "title": "..."}}}
+    """
+    out = client.call(
+        ["api", "GET", f"/open-apis/docx/v1/documents/{docx_token}"],
+    )
+    doc = (out.get("data") or {}).get("document") or {}
+    rev = doc.get("revision_id")
+    return int(rev) if rev is not None else None
+
+
 def get_blocks(client: Client, docx_token: str) -> list[dict]:
     """拉 docx 全部 blocks，自动翻页。
     page_size=500 是飞书上限；大文档（如 checklist 含 4 个表 → 500+ blocks）必须翻页，

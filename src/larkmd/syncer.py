@@ -22,15 +22,18 @@ from typing import Iterable
 from larkmd.blocks import (
     batch_delete_children,
     get_blocks,
+    get_document_revision,
     insert_descendants,
     to_descendant_spec,
 )
+from larkmd.callout_restore import extract_callout_intents, restore_callouts
 from larkmd.client import Client
 from larkmd.config import Config, SectionConfig
 from larkmd.images import patch_image_block, upload_image_media
 from larkmd.importer import delete_drive_file, import_md, move_docx_to_wiki
 from larkmd.links import patch_all_links, rewrite_links_to_placeholder
 from larkmd.mermaid import preprocess_mermaid
+from larkmd.sanitize import strip_larkmd_comments
 from larkmd.state import (
     load_state,
     md_hash,
@@ -61,6 +64,9 @@ class SyncResult:
     wiki_node_token: str | None = None
     table_widths: list[list[int]] = field(default_factory=list)
     image_count: int = 0
+    # image_token → mermaid source. Populated when the uploaded PNG was
+    # rendered from a fenced mermaid block; used by reverse sync to restore.
+    mermaid_blocks: dict[str, str] = field(default_factory=dict)
 
 
 class Syncer:
@@ -152,8 +158,14 @@ class Syncer:
         with tempfile.TemporaryDirectory(prefix="larkmd-") as td:
             tdpath = Path(td)
             munged = tdpath / md_file.name
-            munged.write_text(rewrite_links_to_placeholder(src, {}, rel, self.cfg.paths.root))
-            rendered_md, pngs = preprocess_mermaid(munged, tdpath, self.cfg.mermaid)
+            # Order matters: extract callouts first so they survive as
+            # placeholder paragraphs; only THEN strip the rest.
+            cleaned, callout_intents = extract_callout_intents(src)
+            cleaned = strip_larkmd_comments(cleaned)
+            munged.write_text(rewrite_links_to_placeholder(cleaned, {}, rel, self.cfg.paths.root))
+            rendered_md, mermaid_pairs = preprocess_mermaid(munged, tdpath, self.cfg.mermaid)
+            pngs = [p for _, p in mermaid_pairs]
+            sources = [s for s, _ in mermaid_pairs]
 
             from PIL import Image
             sizes = {p.name: Image.open(p).size for p in pngs}
@@ -164,7 +176,13 @@ class Syncer:
                 docx_token = prev["docx_token"]
                 print(f"  UPDT  {rel}  → docx {docx_token} (in place)")
                 new_image_block_ids, table_widths = self._update_in_place(docx_token, rendered_md, folder)
-                self._upload_and_patch_images(docx_token, pngs, new_image_block_ids, sizes, rel)
+                mermaid_blocks = self._upload_and_patch_images(
+                    docx_token, pngs, new_image_block_ids, sizes, rel, sources=sources,
+                )
+                if callout_intents:
+                    n = restore_callouts(self.client, docx_token, callout_intents)
+                    if n:
+                        print(f"  CALL  {rel}  restored {n}/{len(callout_intents)} callout(s)")
                 return SyncResult(
                     rel=rel,
                     docx_token=docx_token,
@@ -172,24 +190,36 @@ class Syncer:
                     wiki_node_token=prev.get("wiki_node_token"),
                     table_widths=table_widths,
                     image_count=len(pngs),
+                    mermaid_blocks=mermaid_blocks,
                 )
 
             # create
             name = self.cfg.display_name_for(rel)
-            data = import_md(rendered_md, folder, name, cli_path=self.cfg.lark.cli_path)
+            data = import_md(
+                rendered_md, folder, name,
+                cli_path=self.cfg.lark.cli_path, profile=self.cfg.lark.profile,
+            )
             docx_token = data["token"]
             print(f"  IMPT  {rel}  → docx {docx_token}")
 
+            mermaid_blocks: dict[str, str] = {}
             if pngs:
                 blocks = get_blocks(self.client, docx_token)
                 image_blocks = [b for b in blocks if b.get("block_type") == 27]
                 if len(image_blocks) != len(pngs):
                     sys.stderr.write(
                         f"  warn: {rel} 有 {len(pngs)} PNG 但 docx 有 {len(image_blocks)} image block\n")
-                for png, block in zip(pngs, image_blocks):
+                for i, (png, block) in enumerate(zip(pngs, image_blocks)):
                     w, h_px = sizes[png.name]
                     file_token = upload_image_media(self.client, png, block["block_id"])
                     patch_image_block(self.client, docx_token, block["block_id"], file_token, w, h_px)
+                    if i < len(sources):
+                        mermaid_blocks[file_token] = sources[i]
+
+            if callout_intents:
+                n = restore_callouts(self.client, docx_token, callout_intents)
+                if n:
+                    print(f"  CALL  {rel}  restored {n}/{len(callout_intents)} callout(s)")
 
             parent_wiki = self.cfg.wiki_parent_for(rel)
             node_token = move_docx_to_wiki(
@@ -203,6 +233,7 @@ class Syncer:
                 url=wiki_url,
                 wiki_node_token=node_token,
                 image_count=len(pngs),
+                mermaid_blocks=mermaid_blocks,
             )
 
     # ----- in-place update (insert-then-delete) -----
@@ -214,7 +245,10 @@ class Syncer:
         old_children_count = len(old_root.get("children", []))
         saved_widths = extract_table_widths(old_blocks_pre)
 
-        temp_data = import_md(md_path, scratch_folder, md_path.stem + "-tmp", cli_path=self.cfg.lark.cli_path)
+        temp_data = import_md(
+            md_path, scratch_folder, md_path.stem + "-tmp",
+            cli_path=self.cfg.lark.cli_path, profile=self.cfg.lark.profile,
+        )
         temp_token = temp_data["token"]
 
         try:
@@ -269,16 +303,25 @@ class Syncer:
         finally:
             delete_drive_file(self.client, temp_token)
 
-    def _upload_and_patch_images(self, docx_token, pngs, new_image_block_ids, sizes, rel):
+    def _upload_and_patch_images(
+        self, docx_token, pngs, new_image_block_ids, sizes, rel,
+        *, sources: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Upload PNGs into image blocks; return mapping image_token → mermaid source
+        (only for entries where a source is provided, in the same order as pngs)."""
         if not pngs:
-            return
+            return {}
         if len(new_image_block_ids) != len(pngs):
             sys.stderr.write(
                 f"  warn: {rel} 有 {len(pngs)} PNG 但找到 {len(new_image_block_ids)} 个 image block\n")
-        for png, block_id in zip(pngs, new_image_block_ids):
+        token_to_source: dict[str, str] = {}
+        for i, (png, block_id) in enumerate(zip(pngs, new_image_block_ids)):
             w, h_px = sizes[png.name]
             file_token = upload_image_media(self.client, png, block_id)
             patch_image_block(self.client, docx_token, block_id, file_token, w, h_px)
+            if sources and i < len(sources):
+                token_to_source[file_token] = sources[i]
+        return token_to_source
 
     # ----- link pass -----
 
@@ -340,6 +383,14 @@ class Syncer:
 
     def _merge_into_state(self, rel: str, result: SyncResult) -> None:
         prev = self.state["files"].get(rel, {})
+        # Refresh remote-revision baseline so future `pull-plan` correctly
+        # treats this push as the new agreed-upon state. Best-effort: skip on
+        # API hiccup so a successful push isn't undone by a stat-only failure.
+        try:
+            new_revision = get_document_revision(self.client, result.docx_token)
+        except Exception as e:
+            sys.stderr.write(f"  warn: revision fetch failed for {rel}: {e}\n")
+            new_revision = prev.get("last_remote_revision")
         new = {
             "docx_token": result.docx_token,
             "url": result.url,
@@ -347,11 +398,16 @@ class Syncer:
             "last_synced": now_iso(),
             "image_count": result.image_count,
             "table_widths": result.table_widths,
-            "last_remote_revision": prev.get("last_remote_revision"),
+            "last_remote_revision": new_revision,
         }
         if result.wiki_node_token:
             new["wiki_node_token"] = result.wiki_node_token
         for k in ("previous_wiki_node_tokens", "previous_docx_tokens"):
             if k in prev:
                 new[k] = prev[k]
+        # Mermaid mapping is rebuilt every push (re-import generates fresh
+        # image_tokens). If this push had no mermaid blocks, drop any stale
+        # mapping from the prior push.
+        if result.mermaid_blocks:
+            new["mermaid_blocks"] = result.mermaid_blocks
         self.state["files"][rel] = new
