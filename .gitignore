@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# larkmd runtime artifacts
+.feishu-sync-state.json
+.lark-data-*.json
+.larkmd-cache/
+
+# Local env
+.env
+.env.*
+!.env.example
