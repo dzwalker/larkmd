@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "larkmd"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Stateful mirror from a git markdown tree to a Feishu/Lark wiki — incremental sync, transactional updates, cross-doc link patching, table column-width memory, mermaid preprocessing."
 readme = "README.md"
 license = {text = "MIT"}
