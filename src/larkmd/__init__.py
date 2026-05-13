@@ -9,9 +9,10 @@ from larkmd.errors import (
     LarkmdError,
     SchemaMismatchError,
 )
+from larkmd.puller import Puller
 from larkmd.syncer import Syncer
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Client",
@@ -20,6 +21,7 @@ __all__ = [
     "ImporterStuckError",
     "LarkCliError",
     "LarkmdError",
+    "Puller",
     "SchemaMismatchError",
     "Syncer",
     "__version__",
